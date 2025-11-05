@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JWT Security Tool</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔐 JWT Security Tool</h1>
+            <p class="subtitle">Parse, Verify, Crack & Forge JWT Tokens</p>
+        </div>
+
+        <div class="tabs">
+            <button class="tab-btn active" onclick="showTab('analyze')">🔍 Analyze</button>
+            <button class="tab-btn" onclick="showTab('verify')">✅ Verify</button>
+            <button class="tab-btn" onclick="showTab('crack')">🔨 Crack</button>
+            <button class="tab-btn" onclick="showTab('forge')">🎭 Forge</button>
+        </div>
+
+        <div class="input-section section">
+            <label for="token">JWT Token:</label>
+            <textarea id="token" placeholder="Paste your JWT token here..." rows="4"></textarea>
+        </div>
+
+        <!-- Analyze Tab -->
+        <div id="analyze-tab" class="tab-content active">
+            <button class="btn btn-primary" onclick="analyzeToken()">
+                🔍 Analyze Token
+            </button>
+            <div id="analyze-result"></div>
+        </div>
+
+        <!-- Verify Tab -->
+        <div id="verify-tab" class="tab-content">
+            <div class="input-group">
+                <label for="verify-key">Secret Key or Public Key:</label>
+                <textarea id="verify-key" placeholder="Enter secret key or paste public key (PEM format)"></textarea>
+            </div>
+            <div class="input-group">
+                <label for="verify-algorithm">Algorithm (optional):</label>
+                <input type="text" id="verify-algorithm" placeholder="e.g., HS256, RS256 (leave empty to use token's algorithm)">
+            </div>
+            <button class="btn btn-primary" onclick="verifyToken()">
+                ✓ Verify Signature
+            </button>
+            <div id="verify-result"></div>
+        </div>
+
+        <!-- Crack Tab -->
+        <div id="crack-tab" class="tab-content">
+            <div class="checkbox-group">
+                <input type="checkbox" id="use-common" checked>
+                <label for="use-common" style="margin-bottom: 0;">Try common weak secrets first</label>
+            </div>
+            <div class="input-group">
+                <label for="wordlist">Custom Wordlist (optional):</label>
+                <textarea id="wordlist" placeholder="One secret per line&#10;secret&#10;password&#10;123456&#10;..." rows="5"></textarea>
+            </div>
+            <div class="two-columns">
+                <div class="input-group">
+                    <label for="workers">Worker Processes:</label>
+                    <input type="number" id="workers" placeholder="Auto" min="1" max="32">
+                </div>
+            </div>
+            <button class="btn btn-primary" onclick="startCrack()" id="crack-btn">
+                🔓 Start Cracking
+            </button>
+            <button class="btn btn-secondary hidden" onclick="cancelCrack()" id="cancel-btn">
+                ✕ Cancel
+            </button>
+            <div id="crack-result"></div>
+        </div>
+
+        <!-- Forge Tab -->
+        <div id="forge-tab" class="tab-content">
+            <div class="section">
+                <h3>🎭 Token Forging</h3>
+                <p class="warning">⚠️ <strong>For authorized security testing only!</strong> Never use on systems you don't own or have permission to test.</p>
+                
+                <div class="forge-modes">
+                    <label onclick="selectForgeMode(this, 'none')">
+                        <input type="radio" name="forge-mode" value="none" checked>
+                        <div>
+                            <strong>None Algorithm</strong><br>
+                            <small>Remove signature validation</small>
+                        </div>
+                    </label>
+                    <label onclick="selectForgeMode(this, 'modify')">
+                        <input type="radio" name="forge-mode" value="modify">
+                        <div>
+                            <strong>Modify Claims</strong><br>
+                            <small>Change payload values</small>
+                        </div>
+                    </label>
+                    <label onclick="selectForgeMode(this, 'escalate')">
+                        <input type="radio" name="forge-mode" value="escalate">
+                        <div>
+                            <strong>Quick Escalation</strong><br>
+                            <small>Pre-built privilege escalation</small>
+                        </div>
+                    </label>
+                    <label onclick="selectForgeMode(this, 'confusion')">
+                        <input type="radio" name="forge-mode" value="confusion">
+                        <div>
+                            <strong>Algorithm Confusion</strong><br>
+                            <small>RS256 → HS256 attack</small>
+                        </div>
+                    </label>
+                    <label onclick="selectForgeMode(this, 'custom')">
+                        <input type="radio" name="forge-mode" value="custom">
+                        <div>
+                            <strong>Custom Token</strong><br>
+                            <small>Build from scratch</small>
+                        </div>
+                    </label>
+                </div>
+
+                <!-- None Algorithm Options -->
+                <div id="forge-none-options" class="forge-options">
+                    <h4>None Algorithm Attack</h4>
+                    <p>Changes algorithm to 'none' and removes signature validation.</p>
+                    <label>Optional Claim Modifications (JSON):</label>
+                    <textarea id="forge-none-claims" placeholder='{"role": "admin"}' rows="3"></textarea>
+                </div>
+
+                <!-- Modify Claims Options -->
+                <div id="forge-modify-options" class="forge-options" style="display:none;">
+                    <h4>Modify Claims</h4>
+                    <label>Claims to Modify (JSON):</label>
+                    <textarea id="forge-modify-claims" placeholder='{"role": "admin", "isAdmin": true}' rows="3"></textarea>
+                    <label>Secret to Re-sign (optional):</label>
+                    <input type="text" id="forge-modify-secret" placeholder="Leave empty for invalid signature">
+                </div>
+
+                <!-- Escalation Options -->
+                <div id="forge-escalate-options" class="forge-options" style="display:none;">
+                    <h4>Quick Privilege Escalation</h4>
+                    <label>Escalation Type:</label>
+                    <select id="forge-escalate-type" onchange="loadEscalationDescription()">
+                        <option value="user_to_admin">User to Admin</option>
+                        <option value="elevate_permissions">Elevate Permissions</option>
+                        <option value="change_user_id">Change User ID</option>
+                        <option value="extend_expiry">Extend Token Expiry</option>
+                        <option value="bypass_email_verification">Bypass Email Verification</option>
+                    </select>
+                    <div id="escalation-description" class="info-box"></div>
+                    <label>Secret to Re-sign (optional):</label>
+                    <input type="text" id="forge-escalate-secret" placeholder="Leave empty for invalid signature">
+                </div>
+
+                <!-- Confusion Options -->
+                <div id="forge-confusion-options" class="forge-options" style="display:none;">
+                    <h4>Algorithm Confusion (RS256 → HS256)</h4>
+                    <p>Uses public key as HMAC secret - exploits algorithm confusion vulnerability.</p>
+                    <label>Public Key (PEM format):</label>
+                    <textarea id="forge-confusion-key" placeholder="-----BEGIN PUBLIC KEY-----&#10;...&#10;-----END PUBLIC KEY-----" rows="6"></textarea>
+                </div>
+
+                <!-- Custom Token Options -->
+                <div id="forge-custom-options" class="forge-options" style="display:none;">
+                    <h4>Custom Token</h4>
+                    <label>Header (JSON):</label>
+                    <textarea id="forge-custom-header" placeholder='{"alg": "HS256", "typ": "JWT"}' rows="2"></textarea>
+                    <label>Payload (JSON):</label>
+                    <textarea id="forge-custom-payload" placeholder='{"sub": "user123", "role": "admin"}' rows="3"></textarea>
+                    <label>Secret (optional):</label>
+                    <input type="text" id="forge-custom-secret" placeholder="Leave empty for unsigned token">
+                </div>
+
+                <button class="btn" onclick="forgeToken()">🎭 Forge Token</button>
+            </div>
+
+            <!-- Forge Result -->
+            <div id="forge-result" style="display: none;">
+                <div class="section">
+                    <h3>Forged Token Result</h3>
+                    <div id="forge-status"></div>
+                    <div id="forge-token-output"></div>
+                    <div id="forge-details"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tab switching
+        function showTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            
+            document.getElementById(tabName + '-tab').classList.add('active');
+            event.target.classList.add('active');
+            
+            // Load escalation description if forge tab and escalate mode
+            if (tabName === 'forge' && document.querySelector('input[name="forge-mode"]:checked').value === 'escalate') {
+                loadEscalationDescription();
+            }
+        }
+
+        // Analyze Token
+        async function analyzeToken() {
+            const token = document.getElementById('token').value.trim();
+            const resultDiv = document.getElementById('analyze-result');
+            
+            if (!token) {
+                resultDiv.innerHTML = '<div class="error">⚠️ Please enter a JWT token</div>';
+                return;
+            }
+            
+            resultDiv.innerHTML = '<div class="loading">Analyzing token...</div>';
+            
+            try {
+                const response = await fetch('/api/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token })
+                });
+                
+                const result = await response.json();
+                
+                if (!response.ok) {
+                    resultDiv.innerHTML = `<div class="error">✗ Error: ${result.detail || 'Analysis failed'}</div>`;
+                    return;
+                }
+                
+                let html = '<div class="section">';
+                html += '<h3>Token Analysis Results</h3>';
+                
+                // Algorithm info
+                html += `
+                    <div class="result-box">
+                        <h4>Algorithm Information</h4>
+                        <p><strong>Algorithm:</strong> ${escapeHtml(result.algorithm)}</p>
+                        <p><strong>Type:</strong> ${escapeHtml(result.algorithm_type)}</p>
+                    </div>
+                `;
+                
+                // Header and Payload
+                html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;">';
+                html += `
+                    <div class="result-box">
+                        <h4>Header</h4>
+                        <pre>${syntaxHighlight(result.header)}</pre>
+                    </div>
+                    <div class="result-box">
+                        <h4>Payload</h4>
+                        <pre>${syntaxHighlight(result.payload)}</pre>
+                    </div>
+                `;
+                html += '</div>';
+                
+                // Warnings
+                if (result.warnings && result.warnings.length > 0) {
+                    html += '<div class="result-box" style="margin-top:20px;">';
+                    html += '<h4>🔒 Security Warnings</h4>';
+                    result.warnings.forEach(warning => {
+                        const severityColor = warning.severity === 'critical' ? 'var(--danger)' : 
+                                             warning.severity === 'high' ? 'var(--warning)' : 'var(--info)';
+                        html += `
+                            <div style="margin:10px 0;padding:15px;background:rgba(239,68,68,0.1);border-left:4px solid ${severityColor};border-radius:8px;">
+                                <strong style="color:${severityColor};">${escapeHtml(warning.severity.toUpperCase())}</strong> - ${escapeHtml(warning.message)}
+                                <br><small>${escapeHtml(warning.recommendation)}</small>
+                            </div>
+                        `;
+                    });
+                    html += '</div>';
+                }
+                
+                // Timestamp info
+                if (result.timestamp_info && Object.keys(result.timestamp_info).length > 0) {
+                    html += '<div class="result-box" style="margin-top:20px;">';
+                    html += '<h4>⏰ Timestamp Information</h4>';
+                    for (const [key, info] of Object.entries(result.timestamp_info)) {
+                        html += `
+                            <p><strong>${escapeHtml(key)}:</strong> ${escapeHtml(info.readable)}<br>
+                            <small>${escapeHtml(info.relative)}</small></p>
+                        `;
+                    }
+                    html += '</div>';
+                }
+                
+                html += '</div>';
+                resultDiv.innerHTML = html;
+                
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">✗ Error: ${escapeHtml(error.message)}</div>`;
+            }
+        }
+
+        // Verify Token
+        async function verifyToken() {
+            const token = document.getElementById('token').value.trim();
+            const key = document.getElementById('verify-key').value.trim();
+            const algorithm = document.getElementById('verify-algorithm').value.trim();
+            const resultDiv = document.getElementById('verify-result');
+            
+            if (!token) {
+                resultDiv.innerHTML = '<div class="error">⚠️ Please enter a JWT token</div>';
+                return;
+            }
+            
+            if (!key) {
+                resultDiv.innerHTML = '<div class="error">⚠️ Please enter a secret key or public key</div>';
+                return;
+            }
+            
+            resultDiv.innerHTML = '<div class="loading">Verifying signature...</div>';
+            
+            try {
+                const requestData = { token, key };
+                if (algorithm) requestData.algorithm = algorithm;
+                
+                const response = await fetch('/api/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestData)
+                });
+                
+                const result = await response.json();
+                
+                if (!response.ok) {
+                    resultDiv.innerHTML = `<div class="error">✗ Error: ${result.detail || 'Verification failed'}</div>`;
+                    return;
+                }
+                
+                let html = '<div class="section">';
+                
+                if (result.valid) {
+                    html += `
+                        <div class="success">
+                            <h3>✓ Signature Valid</h3>
+                            <p>${escapeHtml(result.message)}</p>
+                            <p><strong>Algorithm:</strong> ${escapeHtml(result.algorithm)}</p>
+                        </div>
+                    `;
+                } else {
+                    html += `
+                        <div class="error">
+                            <h3>✗ Signature Invalid</h3>
+                            <p>${escapeHtml(result.message)}</p>
+                            <p><strong>Algorithm:</strong> ${escapeHtml(result.algorithm)}</p>
+                        </div>
+                    `;
+                }
+                
+                if (result.key_info) {
+                    html += `
+                        <div class="result-box" style="margin-top:20px;">
+                            <h4>Key Information</h4>
+                            <pre>${syntaxHighlight(result.key_info)}</pre>
+                        </div>
+                    `;
+                }
+                
+                html += '</div>';
+                resultDiv.innerHTML = html;
+                
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">✗ Error: ${escapeHtml(error.message)}</div>`;
+            }
+        }
+
+        // Crack Token
+        let currentJobId = null;
+        let statusCheckInterval = null;
+
+        async function startCrack() {
+            const token = document.getElementById('token').value.trim();
+            const useCommon = document.getElementById('use-common').checked;
+            const wordlist = document.getElementById('wordlist').value.trim();
+            const workers = document.getElementById('workers').value.trim();
+            const resultDiv = document.getElementById('crack-result');
+            
+            if (!token) {
+                resultDiv.innerHTML = '<div class="error">⚠️ Please enter a JWT token</div>';
+                return;
+            }
+            
+            resultDiv.innerHTML = '<div class="loading">Starting crack job...</div>';
+            
+            try {
+                const requestData = { token, use_common: useCommon };
+                if (wordlist) requestData.wordlist = wordlist;
+                if (workers) requestData.workers = parseInt(workers);
+                
+                const response = await fetch('/api/crack', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestData)
+                });
+                
+                const result = await response.json();
+                
+                if (!response.ok) {
+                    resultDiv.innerHTML = `<div class="error">✗ Error: ${result.detail || 'Failed to start crack job'}</div>`;
+                    return;
+                }
+                
+                currentJobId = result.job_id;
+                
+                // Show cancel button
+                document.getElementById('crack-btn').classList.add('hidden');
+                document.getElementById('cancel-btn').classList.remove('hidden');
+                
+                // Start polling for status
+                statusCheckInterval = setInterval(checkCrackStatus, 1000);
+                
+                resultDiv.innerHTML = `
+                    <div class="section">
+                        <div class="info-box">Job started with ID: ${escapeHtml(result.job_id)}</div>
+                        <div id="crack-progress"></div>
+                    </div>
+                `;
+                
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">✗ Error: ${escapeHtml(error.message)}</div>`;
+            }
+        }
+
+        async function checkCrackStatus() {
+            if (!currentJobId) return;
+            
+            try {
+                const response = await fetch(`/api/job/${currentJobId}/status`);
+                const job = await response.json();
+                
+                const progressDiv = document.getElementById('crack-progress');
+                if (!progressDiv) return;
+                
+                let html = '<div class="result-box">';
+                html += `<h4>Status: ${escapeHtml(job.status)}</h4>`;
+                
+                if (job.progress) {
+                    html += `
+                        <p><strong>Attempts:</strong> ${job.progress.attempts.toLocaleString()}</p>
+                        <p><strong>Speed:</strong> ${job.progress.attempts_per_second.toLocaleString()} attempts/sec</p>
+                        <p><strong>Elapsed:</strong> ${job.progress.elapsed_time.toFixed(2)}s</p>
+                    `;
+                    if (job.progress.percentage !== null) {
+                        html += `<p><strong>Progress:</strong> ${job.progress.percentage.toFixed(1)}%</p>`;
+                    }
+                    if (job.progress.estimated_remaining !== null) {
+                        html += `<p><strong>Estimated remaining:</strong> ${job.progress.estimated_remaining.toFixed(2)}s</p>`;
+                    }
+                }
+                
+                if (job.status === 'completed' && job.result) {
+                    clearInterval(statusCheckInterval);
+                    document.getElementById('crack-btn').classList.remove('hidden');
+                    document.getElementById('cancel-btn').classList.add('hidden');
+                    
+                    if (job.result.success) {
+                        html += `
+                            <div class="secret-found">
+                                <h3>🎉 Secret Found!</h3>
+                                
+                                <div class="secret-display">
+                                    <div class="secret-display-header">
+                                        <h4>🔑 Secret Key</h4>
+                                        <button class="btn-copy-secret" onclick="copySecret(event, '${escapeHtml(job.result.secret).replace(/'/g, "\\'")}')">
+                                            📋 Copy Secret
+                                        </button>
+                                    </div>
+                                    <div class="secret-value" id="crack-secret-value">${escapeHtml(job.result.secret)}</div>
+                                </div>
+
+                                <div class="stats-grid">
+                                    <div class="stat-item">
+                                        <strong>Total Attempts</strong>
+                                        <div class="stat-value">${job.result.attempts.toLocaleString()}</div>
+                                    </div>
+                                    <div class="stat-item">
+                                        <strong>Time Taken</strong>
+                                        <div class="stat-value">${job.result.elapsed_time.toFixed(2)}s</div>
+                                    </div>
+                                    <div class="stat-item">
+                                        <strong>Speed</strong>
+                                        <div class="stat-value">${job.result.attempts_per_second.toLocaleString()}/s</div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        html += `
+                            <div class="error" style="margin-top:20px;">
+                                <h3>❌ Secret Not Found</h3>
+                                <p>Tried ${job.result.attempts.toLocaleString()} combinations without success.</p>
+                                <p>Consider using a larger wordlist or the secret may be too complex to crack.</p>
+                            </div>
+                        `;
+                    }
+                } else if (job.status === 'failed') {
+                    clearInterval(statusCheckInterval);
+                    document.getElementById('crack-btn').classList.remove('hidden');
+                    document.getElementById('cancel-btn').classList.add('hidden');
+                    html += `<div class="error" style="margin-top:20px;">Job failed: ${escapeHtml(job.error)}</div>`;
+                } else if (job.status === 'cancelled') {
+                    clearInterval(statusCheckInterval);
+                    document.getElementById('crack-btn').classList.remove('hidden');
+                    document.getElementById('cancel-btn').classList.add('hidden');
+                    html += '<div class="warning" style="margin-top:20px;">Job was cancelled</div>';
+                }
+                
+                html += '</div>';
+                progressDiv.innerHTML = html;
+                
+            } catch (error) {
+                console.error('Error checking status:', error);
+            }
+        }
+
+        async function cancelCrack() {
+            if (!currentJobId) return;
+            
+            try {
+                await fetch(`/api/job/${currentJobId}`, { method: 'DELETE' });
+                clearInterval(statusCheckInterval);
+                document.getElementById('crack-btn').classList.remove('hidden');
+                document.getElementById('cancel-btn').classList.add('hidden');
+            } catch (error) {
+                console.error('Error cancelling job:', error);
+            }
+        }
+
+        // Forge mode selection
+        function selectForgeMode(label, mode) {
+            document.querySelectorAll('.forge-modes label').forEach(l => l.classList.remove('selected'));
+            label.classList.add('selected');
+            
+            document.querySelectorAll('.forge-options').forEach(opt => opt.style.display = 'none');
+            document.getElementById(`forge-${mode}-options`).style.display = 'block';
+            
+            if (mode === 'escalate') {
+                loadEscalationDescription();
+            }
+        }
+
+        // Load escalation descriptions
+        async function loadEscalationDescription() {
+            const type = document.getElementById('forge-escalate-type').value;
+            try {
+                const response = await fetch('/api/escalations');
+                const escalations = await response.json();
+                const escalation = escalations[type];
+                
+                if (escalation) {
+                    document.getElementById('escalation-description').innerHTML = `
+                        <strong>${escalation.name}</strong><br>
+                        ${escalation.description}<br>
+                        <small>Modifications: <code>${JSON.stringify(escalation.modifications)}</code></small>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error loading escalations:', error);
+            }
+        }
+
+        // Forge token
+        async function forgeToken() {
+            const token = document.getElementById('token').value.trim();
+            if (!token && !['custom'].includes(document.querySelector('input[name="forge-mode"]:checked').value)) {
+                alert('Please enter a JWT token');
+                return;
+            }
+
+            const mode = document.querySelector('input[name="forge-mode"]:checked').value;
+            const resultDiv = document.getElementById('forge-result');
+            const statusDiv = document.getElementById('forge-status');
+            const tokenOutput = document.getElementById('forge-token-output');
+            const detailsDiv = document.getElementById('forge-details');
+
+            resultDiv.style.display = 'none';
+            statusDiv.innerHTML = '<div class="loading">Forging token...</div>';
+            resultDiv.style.display = 'block';
+
+            try {
+                let requestData = { token, mode };
+
+                if (mode === 'none') {
+                    const claims = document.getElementById('forge-none-claims').value.trim();
+                    if (claims) requestData.claims = JSON.parse(claims);
+                } else if (mode === 'modify') {
+                    const claims = document.getElementById('forge-modify-claims').value.trim();
+                    const secret = document.getElementById('forge-modify-secret').value.trim();
+                    if (!claims) {
+                        alert('Please enter claims to modify');
+                        return;
+                    }
+                    requestData.claims = JSON.parse(claims);
+                    if (secret) requestData.secret = secret;
+                } else if (mode === 'escalate') {
+                    requestData.escalation_type = document.getElementById('forge-escalate-type').value;
+                    const secret = document.getElementById('forge-escalate-secret').value.trim();
+                    if (secret) requestData.secret = secret;
+                } else if (mode === 'confusion') {
+                    const publicKey = document.getElementById('forge-confusion-key').value.trim();
+                    if (!publicKey) {
+                        alert('Please enter public key');
+                        return;
+                    }
+                    requestData.public_key = publicKey;
+                } else if (mode === 'custom') {
+                    const header = document.getElementById('forge-custom-header').value.trim();
+                    const payload = document.getElementById('forge-custom-payload').value.trim();
+                    const secret = document.getElementById('forge-custom-secret').value.trim();
+                    if (!header || !payload) {
+                        alert('Please enter both header and payload');
+                        return;
+                    }
+                    requestData.header = JSON.parse(header);
+                    requestData.payload = JSON.parse(payload);
+                    if (secret) requestData.secret = secret;
+                    requestData.token = '';  // Not needed for custom
+                }
+
+                const response = await fetch('/api/forge', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestData)
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    statusDiv.innerHTML = `<div class="success">✓ ${result.message}</div>`;
+                    
+                    tokenOutput.innerHTML = `
+                        <div class="result-box">
+                            <div class="result-header">
+                                <h4>Forged Token</h4>
+                                <button class="btn btn-secondary" onclick="copyForgedToken(event)">📋 Copy</button>
+                            </div>
+                            <pre id="forged-token-text">${escapeHtml(result.token)}</pre>
+                        </div>
+                    `;
+
+                    let detailsHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px;">';
+                    
+                    if (result.header) {
+                        detailsHtml += `
+                            <div class="result-box">
+                                <h4>New Header</h4>
+                                <pre>${syntaxHighlight(result.header)}</pre>
+                            </div>
+                        `;
+                    }
+                    
+                    if (result.payload) {
+                        detailsHtml += `
+                            <div class="result-box">
+                                <h4>New Payload</h4>
+                                <pre>${syntaxHighlight(result.payload)}</pre>
+                            </div>
+                        `;
+                    }
+                    
+                    detailsHtml += '</div>';
+                    detailsDiv.innerHTML = detailsHtml;
+                } else {
+                    statusDiv.innerHTML = `<div class="error">✗ ${result.message}</div>`;
+                    tokenOutput.innerHTML = '';
+                    detailsDiv.innerHTML = '';
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<div class="error">✗ Error: ${error.message}</div>`;
+                tokenOutput.innerHTML = '';
+                detailsDiv.innerHTML = '';
+            }
+        }
+
+        function copyForgedToken(event) {
+            event.preventDefault();
+            const text = document.getElementById('forged-token-text').textContent;
+            const btn = event.target.closest('button');
+            
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '✓ Copied!';
+                btn.style.background = '#059669';
+                setTimeout(() => {
+                    btn.innerHTML = originalText;
+                    btn.style.background = '';
+                }, 2000);
+            }).catch(err => {
+                alert('Failed to copy token');
+                console.error('Copy failed:', err);
+            });
+        }
+
+        function copySecret(event, secret) {
+            event.preventDefault();
+            const btn = event.target.closest('.btn-copy-secret');
+            
+            navigator.clipboard.writeText(secret).then(() => {
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '✓ Copied!';
+                btn.style.background = '#059669';
+                setTimeout(() => {
+                    btn.innerHTML = originalText;
+                    btn.style.background = '';
+                }, 2000);
+            }).catch(err => {
+                alert('Failed to copy secret');
+                console.error('Copy failed:', err);
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function syntaxHighlight(json) {
+            if (typeof json !== 'string') json = JSON.stringify(json, null, 2);
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, match => {
+                let cls = 'number';
+                if (/^"/.test(match)) {
+                    cls = /:$/.test(match) ? 'key' : 'string';
+                } else if (/true|false/.test(match)) {
+                    cls = 'boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'null';
+                }
+                return `<span class="${cls}">${match}</span>`;
+            });
+        }
+
+        // Initialize forge mode on load
+        document.addEventListener('DOMContentLoaded', () => {
+            const firstLabel = document.querySelector('.forge-modes label');
+            if (firstLabel) selectForgeMode(firstLabel, 'none');
+        });
+    </script>
+</body>
+</html>

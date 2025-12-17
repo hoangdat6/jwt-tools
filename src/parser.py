@@ -1,12 +1,14 @@
-"""JWT Parser and Analyzer"""
+"""JWT Parser and Analyzer - Simplified with Security Analyzer"""
 
 import json
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 from enum import Enum
+from datetime import datetime, timezone
 
 from .utils.base64url import base64url_decode
 from .utils.time_utils import humanize_timestamp, is_expired, time_until_expiry
+from .security_analyzer import JWTSecurityAnalyzer, SecurityWarning
 
 
 class AlgorithmType(Enum):
@@ -15,15 +17,6 @@ class AlgorithmType(Enum):
     SYMMETRIC = "symmetric"  # HS256, HS384, HS512
     ASYMMETRIC = "asymmetric"  # RS256, RS384, RS512, ES256, PS256, etc.
     UNKNOWN = "unknown"
-
-
-@dataclass
-class SecurityWarning:
-    """Security warning found in JWT"""
-    severity: str  # "critical", "high", "medium", "low"
-    category: str
-    message: str
-    recommendation: str
 
 
 @dataclass
@@ -37,6 +30,7 @@ class JWTAnalysis:
     algorithm_type: AlgorithmType
     warnings: List[SecurityWarning]
     timestamp_info: Dict
+    security_score: int  # 0-100, lower is worse
 
 
 class JWTParser:
@@ -44,14 +38,14 @@ class JWTParser:
     
     SYMMETRIC_ALGORITHMS = ['HS256', 'HS384', 'HS512']
     ASYMMETRIC_ALGORITHMS = ['RS256', 'RS384', 'RS512', 'ES256', 'ES384', 'ES512', 
-                             'PS256', 'PS384', 'PS512']
+                             'PS256', 'PS384', 'PS512', 'EdDSA']
     
     def __init__(self):
-        self.warnings: List[SecurityWarning] = []
+        self.security_analyzer = JWTSecurityAnalyzer()
     
     def parse(self, token: str) -> JWTAnalysis:
         """
-        Parse and analyze a JWT token.
+        Parse and analyze a JWT token with comprehensive security checks.
         
         Args:
             token: JWT token string
@@ -62,8 +56,6 @@ class JWTParser:
         Raises:
             ValueError: If token format is invalid
         """
-        self.warnings = []
-        
         # Split token into parts
         parts = token.strip().split('.')
         if len(parts) != 3:
@@ -89,10 +81,14 @@ class JWTParser:
         algorithm = header.get('alg', 'unknown').upper()
         algorithm_type = self._detect_algorithm_type(algorithm)
         
-        # Analyze security
-        self._analyze_algorithm(algorithm, algorithm_type)
-        self._analyze_header(header)
-        self._analyze_payload(payload)
+        # Security analysis (delegated to SecurityAnalyzer)
+        warnings, security_score = self.security_analyzer.analyze(
+            header=header,
+            payload=payload,
+            signature=signature_b64,
+            algorithm=algorithm,
+            algorithm_type=algorithm_type.value
+        )
         
         # Parse timestamps
         timestamp_info = self._parse_timestamps(payload)
@@ -104,8 +100,9 @@ class JWTParser:
             signature=signature_b64,
             algorithm=algorithm,
             algorithm_type=algorithm_type,
-            warnings=self.warnings,
-            timestamp_info=timestamp_info
+            warnings=warnings,
+            timestamp_info=timestamp_info,
+            security_score=security_score
         )
     
     def _detect_algorithm_type(self, algorithm: str) -> AlgorithmType:
@@ -120,115 +117,6 @@ class JWTParser:
             return AlgorithmType.ASYMMETRIC
         else:
             return AlgorithmType.UNKNOWN
-    
-    def _analyze_algorithm(self, algorithm: str, alg_type: AlgorithmType):
-        """Analyze algorithm security"""
-        alg_upper = algorithm.upper()
-        
-        # Critical: None algorithm
-        if alg_type == AlgorithmType.NONE:
-            self.warnings.append(SecurityWarning(
-                severity="critical",
-                category="Algorithm",
-                message="Token uses 'none' algorithm - signature verification is disabled!",
-                recommendation="Never use 'none' algorithm in production. This allows token forgery."
-            ))
-        
-        # Unknown algorithm
-        if alg_type == AlgorithmType.UNKNOWN:
-            self.warnings.append(SecurityWarning(
-                severity="medium",
-                category="Algorithm",
-                message=f"Unknown or non-standard algorithm: {algorithm}",
-                recommendation="Verify this algorithm is supported by your JWT library."
-            ))
-        
-        # Weak symmetric algorithms (informational)
-        if alg_upper in self.SYMMETRIC_ALGORITHMS:
-            self.warnings.append(SecurityWarning(
-                severity="low",
-                category="Algorithm",
-                message=f"Token uses symmetric algorithm ({algorithm}) - vulnerable to brute-force if secret is weak",
-                recommendation="Use strong, random secrets (min 256 bits). Consider asymmetric algorithms for better key management."
-            ))
-    
-    def _analyze_header(self, header: Dict):
-        """Analyze JWT header for security issues"""
-        
-        # Check for 'jku' (JSON Web Key URL) - potential SSRF
-        if 'jku' in header:
-            self.warnings.append(SecurityWarning(
-                severity="high",
-                category="Header",
-                message="Token contains 'jku' (JWK Set URL) header",
-                recommendation="Validate 'jku' URL strictly. This can be exploited for SSRF or key confusion attacks."
-            ))
-        
-        # Check for 'jwk' (embedded public key) - key confusion
-        if 'jwk' in header:
-            self.warnings.append(SecurityWarning(
-                severity="high",
-                category="Header",
-                message="Token contains embedded 'jwk' (public key) in header",
-                recommendation="Verify public keys from trusted sources only. Embedded keys can enable algorithm confusion attacks."
-            ))
-        
-        # Check for 'kid' manipulation
-        if 'kid' in header:
-            kid = header['kid']
-            # Check for path traversal attempts
-            if '../' in str(kid) or '..\\' in str(kid):
-                self.warnings.append(SecurityWarning(
-                    severity="high",
-                    category="Header",
-                    message=f"Suspicious 'kid' value with path traversal characters: {kid}",
-                    recommendation="Validate 'kid' parameter strictly to prevent path traversal attacks."
-                ))
-            # Check for SQL injection patterns
-            if any(pattern in str(kid).lower() for pattern in ["'", '"', '--', ';', 'union']):
-                self.warnings.append(SecurityWarning(
-                    severity="high",
-                    category="Header",
-                    message=f"Suspicious 'kid' value with SQL injection patterns: {kid}",
-                    recommendation="Sanitize 'kid' parameter to prevent SQL injection."
-                ))
-    
-    def _analyze_payload(self, payload: Dict):
-        """Analyze JWT payload for security issues"""
-        
-        # Check for missing expiration
-        if 'exp' not in payload:
-            self.warnings.append(SecurityWarning(
-                severity="medium",
-                category="Payload",
-                message="Token has no expiration time ('exp' claim)",
-                recommendation="Always set expiration time for tokens to limit their lifetime."
-            ))
-        
-        # Check for very long expiration
-        if 'exp' in payload and 'iat' in payload:
-            lifetime = payload['exp'] - payload['iat']
-            if lifetime > 86400 * 365:  # More than 1 year
-                self.warnings.append(SecurityWarning(
-                    severity="medium",
-                    category="Payload",
-                    message=f"Token has very long lifetime: {lifetime // 86400} days",
-                    recommendation="Use shorter token lifetimes (hours to days) for better security."
-                ))
-        
-        # Check for sensitive data in payload
-        sensitive_keys = ['password', 'secret', 'api_key', 'private_key', 'ssn', 
-                         'credit_card', 'card_number']
-        found_sensitive = [key for key in payload.keys() 
-                          if any(sensitive in key.lower() for sensitive in sensitive_keys)]
-        
-        if found_sensitive:
-            self.warnings.append(SecurityWarning(
-                severity="high",
-                category="Payload",
-                message=f"Token may contain sensitive data: {', '.join(found_sensitive)}",
-                recommendation="Never store sensitive data in JWT payload - it's only base64 encoded, not encrypted."
-            ))
     
     def _parse_timestamps(self, payload: Dict) -> Dict:
         """Parse and humanize timestamp claims"""
@@ -249,19 +137,50 @@ class JWTParser:
             iat = payload['iat']
             timestamp_info['iat'] = {
                 'value': iat,
-                'human': humanize_timestamp(iat)
+                'human': humanize_timestamp(iat),
+                'time_remaining': self._time_since(iat)
             }
         
         # nbf - Not Before
         if 'nbf' in payload:
             nbf = payload['nbf']
+            current_time = datetime.now(timezone.utc).timestamp()
             timestamp_info['nbf'] = {
                 'value': nbf,
                 'human': humanize_timestamp(nbf),
-                'active': nbf <= datetime.now(timezone.utc).timestamp()
+                'active': nbf <= current_time,
+                'time_remaining': self._time_until(nbf) if nbf > current_time else f"active since {self._time_since(nbf)}"
             }
         
         return timestamp_info
+    
+    def _time_since(self, timestamp: int) -> str:
+        """Calculate time since timestamp"""
+        current_time = datetime.now(timezone.utc).timestamp()
+        diff = int(current_time - timestamp)
+        
+        if diff < 60:
+            return f"{diff} seconds ago"
+        elif diff < 3600:
+            return f"{diff // 60} minutes ago"
+        elif diff < 86400:
+            return f"{diff // 3600} hours ago"
+        else:
+            return f"{diff // 86400} days ago"
+    
+    def _time_until(self, timestamp: int) -> str:
+        """Calculate time until timestamp"""
+        current_time = datetime.now(timezone.utc).timestamp()
+        diff = int(timestamp - current_time)
+        
+        if diff < 60:
+            return f"in {diff} seconds"
+        elif diff < 3600:
+            return f"in {diff // 60} minutes"
+        elif diff < 86400:
+            return f"in {diff // 3600} hours"
+        else:
+            return f"in {diff // 86400} days"
     
     def format_analysis(self, analysis: JWTAnalysis, colors: bool = True) -> str:
         """
@@ -284,6 +203,17 @@ class JWTParser:
         lines.append("=" * 70)
         lines.append("JWT SECURITY ANALYSIS")
         lines.append("=" * 70)
+        lines.append("")
+        
+        # Security Score
+        score_color = Fore.GREEN if analysis.security_score >= 80 else \
+                     Fore.YELLOW if analysis.security_score >= 60 else \
+                     Fore.RED
+        if colors:
+            score_text = score_color + f"Security Score: {analysis.security_score}/100" + Style.RESET_ALL
+        else:
+            score_text = f"Security Score: {analysis.security_score}/100"
+        lines.append(score_text)
         lines.append("")
         
         # Algorithm Info
@@ -310,7 +240,7 @@ class JWTParser:
                         status = (Fore.RED if info['expired'] else Fore.GREEN) + status + Style.RESET_ALL
                     lines.append(f"  {claim}: {info['human']} {status}")
                 elif claim == 'iat':
-                    lines.append(f"  {claim}: {info['human']}")
+                    lines.append(f"  {claim}: {info['human']} ({info['time_remaining']})")
                 elif claim == 'nbf':
                     status = f"[{'ACTIVE' if info['active'] else 'NOT YET ACTIVE'}]"
                     if colors:
@@ -320,13 +250,14 @@ class JWTParser:
         
         # Security Warnings
         if analysis.warnings:
-            lines.append("SECURITY WARNINGS:")
+            lines.append(f"SECURITY WARNINGS ({len(analysis.warnings)} found):")
             for i, warning in enumerate(analysis.warnings, 1):
                 severity_color = {
                     'critical': Fore.RED,
                     'high': Fore.MAGENTA,
                     'medium': Fore.YELLOW,
-                    'low': Fore.CYAN
+                    'low': Fore.CYAN,
+                    'info': Fore.BLUE
                 }
                 
                 if colors:
@@ -338,6 +269,10 @@ class JWTParser:
                 lines.append(f"\n  {i}. {severity_text} {warning.category}")
                 lines.append(f"     {warning.message}")
                 lines.append(f"     → {warning.recommendation}")
+                if warning.cve:
+                    lines.append(f"     CVE: {warning.cve}")
+                if warning.owasp:
+                    lines.append(f"     OWASP: {warning.owasp}")
             lines.append("")
         else:
             lines.append("✓ No security warnings found")
@@ -346,7 +281,3 @@ class JWTParser:
         lines.append("=" * 70)
         
         return "\n".join(lines)
-
-
-# Import datetime for timestamp parsing
-from datetime import datetime, timezone

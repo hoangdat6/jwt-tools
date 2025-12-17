@@ -1,11 +1,10 @@
-"""JWT Brute-force Cracking Engine"""
+"""JWT Brute-force Cracking Engine - Fixed Version"""
 
 import time
 import multiprocessing as mp
-from typing import Optional, List, Callable, Iterator
+from typing import Optional, List, Callable, Iterator, Tuple
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Empty
 
 from .verifier import JWTVerifier
 
@@ -33,41 +32,7 @@ class ProgressUpdate:
 class WordlistLoader:
     """Load and manage wordlists"""
     
-    # Built-in common weak secrets
-    COMMON_SECRETS = [
-        "",  # Empty secret
-        "secret",
-        "Secret",
-        "SECRET",
-        "password",
-        "Password",
-        "PASSWORD",
-        "123456",
-        "12345678",
-        "admin",
-        "root",
-        "test",
-        "jwt-secret",
-        "jwt_secret",
-        "jwtsecret",
-        "your-256-bit-secret",
-        "my-secret-key",
-        "mysecretkey",
-        "default",
-        "changeme",
-        "letmein",
-        "qwerty",
-        "abc123",
-        "JWT_SECRET",
-        "SECRET_KEY",
-        "API_KEY",
-        "TOKEN_SECRET",
-        # Environment variable names (common in config leaks)
-        "JWT_SECRET_KEY",
-        "APP_SECRET",
-        "SESSION_SECRET",
-    ]
-    
+
     @staticmethod
     def load_from_file(filepath: str) -> Iterator[str]:
         """
@@ -90,10 +55,6 @@ class WordlistLoader:
                 if secret:  # Skip empty lines
                     yield secret
     
-    @staticmethod
-    def load_common_secrets() -> List[str]:
-        """Get built-in common weak secrets"""
-        return WordlistLoader.COMMON_SECRETS.copy()
     
     @staticmethod
     def load_from_content(content: str) -> Iterator[str]:
@@ -122,50 +83,29 @@ class WordlistLoader:
             return 0
 
 
-def _worker_process(token: str, secret_queue: mp.Queue, result_queue: mp.Queue, 
-                    counter: mp.Value, stop_event: mp.Event):
+def _verify_secret_worker(args: Tuple[str, str]) -> Tuple[str, bool]:
     """
-    Worker process for parallel cracking.
+    Worker function for verifying a single secret.
+    Used by Process Pool.
     
     Args:
-        token: JWT token to crack
-        secret_queue: Queue of secrets to test
-        result_queue: Queue to put result if found
-        counter: Shared counter for attempts
-        stop_event: Event to signal workers to stop
+        args: Tuple of (token, secret)
+        
+    Returns:
+        Tuple of (secret, is_valid)
     """
+    token, secret = args
     verifier = JWTVerifier()
-    
-    while not stop_event.is_set():
-        try:
-            # Get secret from queue (timeout to check stop_event)
-            secret = secret_queue.get(timeout=0.1)
-            
-            if secret is None:  # Poison pill
-                break
-            
-            # Try to verify
-            result = verifier.verify(token, secret)
-            
-            # Increment counter
-            with counter.get_lock():
-                counter.value += 1
-            
-            # If valid, put in result queue and signal stop
-            if result.valid:
-                result_queue.put((True, secret))
-                stop_event.set()
-                break
-                
-        except Empty:
-            continue
-        except Exception as e:
-            # Log error but continue
-            pass
+    try:
+        result = verifier.verify(token, secret)
+        return (secret, result.valid)
+    except Exception:
+        # If verification fails, treat as invalid
+        return (secret, False)
 
 
 class JWTCracker:
-    """JWT Brute-force Cracker"""
+    """JWT Brute-force Cracker - Fixed Version"""
     
     def __init__(self, num_workers: Optional[int] = None):
         """
@@ -197,8 +137,7 @@ class JWTCracker:
         # Prepare secrets iterator
         secrets_iter = self._prepare_secrets(wordlist_path, wordlist_content, use_common)
         
-        # For multiprocessing, we need to convert to list (unfortunately)
-        # But for streaming approach, we can process directly
+        # Convert to list for pool processing
         secrets_list = list(secrets_iter)
         total_secrets = len(secrets_list)
         
@@ -209,16 +148,10 @@ class JWTCracker:
                 elapsed_time=0.0
             )
         
-        # Try multiprocessing first, fall back to single-threaded
-        try:
-            result = self._crack_multiprocess(
-                token, secrets_list, total_secrets, progress_callback
-            )
-        except Exception as e:
-            # Fallback to single-threaded
-            result = self._crack_singlethread(
-                token, iter(secrets_list), total_secrets, progress_callback
-            )
+        # Use Process Pool for reliable multiprocessing
+        result = self._crack_with_pool(
+            token, secrets_list, total_secrets, progress_callback
+        )
         
         # Calculate final stats
         elapsed = time.time() - start_time
@@ -234,7 +167,7 @@ class JWTCracker:
                        progress_callback: Optional[Callable] = None,
                        chunk_size: int = 1000) -> CrackResult:
         """
-        Crack JWT token using streaming approach with chunked multiprocessing.
+        Crack JWT token using streaming approach.
         More memory efficient for large wordlists.
         
         Args:
@@ -250,20 +183,13 @@ class JWTCracker:
         """
         start_time = time.time()
         
-        # Prepare secrets iterator (don't convert to list!)
+        # Prepare secrets iterator
         secrets_iter = self._prepare_secrets(wordlist_path, wordlist_content, use_common)
         
-        # Try chunked multiprocessing, fall back to single-threaded
-        try:
-            result = self._crack_streaming_multiprocess(
-                token, secrets_iter, chunk_size, progress_callback
-            )
-        except Exception as e:
-            # Fallback: recreate iterator and use single-threaded
-            secrets_iter = self._prepare_secrets(wordlist_path, wordlist_content, use_common)
-            result = self._crack_singlethread(
-                token, secrets_iter, None, progress_callback
-            )
+        # Use streaming pool approach
+        result = self._crack_streaming_pool(
+            token, secrets_iter, chunk_size, progress_callback
+        )
         
         # Calculate final stats
         elapsed = time.time() - start_time
@@ -277,215 +203,143 @@ class JWTCracker:
                         wordlist_content: Optional[str], 
                         use_common: bool) -> Iterator[str]:
         """Prepare iterator of secrets to try"""
-        # Start with common secrets if requested
-        if use_common:
-            for secret in WordlistLoader.load_common_secrets():
-                yield secret
-        
-        # Then load from content (takes precedence) or file
+        # Then wordlist content if provided
         if wordlist_content:
             for secret in WordlistLoader.load_from_content(wordlist_content):
                 yield secret
-        elif wordlist_path:
+        
+        # Finally wordlist file if provided
+        if wordlist_path:
             for secret in WordlistLoader.load_from_file(wordlist_path):
                 yield secret
     
-    def _crack_multiprocess(self, token: str, secrets_list: List[str],
-                           total_secrets: int, progress_callback: Optional[Callable]) -> CrackResult:
-        """Crack using multiprocessing"""
-        # Create shared objects
-        manager = mp.Manager()
-        secret_queue = manager.Queue()
-        result_queue = manager.Queue()
-        counter = mp.Value('i', 0)
-        stop_event = mp.Event()
+    def _crack_with_pool(self, token: str, secrets_list: List[str],
+                        total_secrets: int, progress_callback: Optional[Callable]) -> CrackResult:
+        """
+        Crack using Process Pool (simple and reliable).
         
-        # Start worker processes
-        workers = []
-        for _ in range(self.num_workers):
-            p = mp.Process(
-                target=_worker_process,
-                args=(token, secret_queue, result_queue, counter, stop_event),
-                daemon=True
-            )
-            p.start()
-            workers.append(p)
-        
-        # Feed secrets to queue
+        This is the recommended approach:
+        - Automatic resource cleanup
+        - No deadlocks
+        - Built-in error handling
+        - Simple code
+        """
+        attempts = 0
         start_time = time.time()
         last_update = start_time
         
+        # Prepare arguments for workers
+        args_list = [(token, secret) for secret in secrets_list]
+        
         try:
-            # Put all secrets in queue
-            for secret in secrets_list:
-                if stop_event.is_set():
-                    break
-                secret_queue.put(secret)
-                
-                # Update progress periodically
-                current_time = time.time()
-                if progress_callback and (current_time - last_update) >= 1.0:
-                    elapsed = current_time - start_time
-                    attempts = counter.value
+            # Use Process Pool with context manager (auto cleanup)
+            with mp.Pool(processes=self.num_workers) as pool:
+                # Use imap_unordered for streaming results
+                # chunksize controls how many tasks each worker gets at once
+                for secret, is_valid in pool.imap_unordered(_verify_secret_worker, args_list, chunksize=100):
+                    attempts += 1
                     
-                    progress = ProgressUpdate(
-                        attempts=attempts,
-                        elapsed_time=elapsed,
-                        attempts_per_second=attempts / elapsed if elapsed > 0 else 0,
-                        percentage=(attempts / total_secrets * 100) if total_secrets > 0 else None,
-                        estimated_remaining=((total_secrets - attempts) / (attempts / elapsed)) if attempts > 0 and elapsed > 0 else None
-                    )
-                    progress_callback(progress)
-                    last_update = current_time
+                    # Found the secret!
+                    if is_valid:
+                        pool.terminate()  # Stop all workers immediately
+                        return CrackResult(
+                            success=True,
+                            secret=secret,
+                            attempts=attempts
+                        )
+                    
+                    # Update progress periodically
+                    current_time = time.time()
+                    if progress_callback and (current_time - last_update) >= 1.0:
+                        elapsed = current_time - start_time
+                        
+                        progress = ProgressUpdate(
+                            attempts=attempts,
+                            elapsed_time=elapsed,
+                            attempts_per_second=attempts / elapsed if elapsed > 0 else 0,
+                            percentage=(attempts / total_secrets * 100) if total_secrets > 0 else None,
+                            estimated_remaining=((total_secrets - attempts) / (attempts / elapsed)) if attempts > 0 and elapsed > 0 else None
+                        )
+                        progress_callback(progress)
+                        last_update = current_time
             
-            # Send poison pills to stop workers
-            for _ in range(self.num_workers):
-                secret_queue.put(None)
+            # No secret found
+            return CrackResult(
+                success=False,
+                attempts=attempts
+            )
             
-            # Wait for workers to finish or result to be found
-            timeout = max(30.0, total_secrets / 1000)  # Dynamic timeout
-            for p in workers:
-                p.join(timeout=timeout)
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=1)
-            
-            # Check result
-            try:
-                success, secret = result_queue.get_nowait()
-                return CrackResult(
-                    success=True,
-                    secret=secret,
-                    attempts=counter.value
-                )
-            except Empty:
-                return CrackResult(
-                    success=False,
-                    attempts=counter.value
-                )
-                
         except Exception as e:
-            # Clean up workers
-            stop_event.set()
-            for p in workers:
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=1)
-            raise
-        finally:
-            # Ensure all workers are cleaned up
-            for p in workers:
-                if p.is_alive():
-                    p.terminate()
+            # If pool fails, fallback to single-threaded
+            print(f"Pool failed ({e}), falling back to single-threaded mode")
+            remaining_secrets = secrets_list[attempts:]
+            fallback_result = self._crack_singlethread(
+                token, iter(remaining_secrets), len(remaining_secrets), progress_callback
+            )
+            fallback_result.attempts += attempts
+            return fallback_result
     
-    def _crack_streaming_multiprocess(self, token: str, secrets_iter: Iterator[str],
-                                      chunk_size: int, 
-                                      progress_callback: Optional[Callable]) -> CrackResult:
+    def _crack_streaming_pool(self, token: str, secrets_iter: Iterator[str],
+                             chunk_size: int, progress_callback: Optional[Callable]) -> CrackResult:
         """
-        Crack using multiprocessing with streaming approach.
-        Feeds secrets in chunks to reduce queue overhead.
+        Crack using Process Pool with streaming iterator.
+        Memory efficient for very large wordlists.
         """
-        # Create shared objects
-        manager = mp.Manager()
-        secret_queue = manager.Queue(maxsize=self.num_workers * 2)  # Limit queue size
-        result_queue = manager.Queue()
-        counter = mp.Value('i', 0)
-        stop_event = mp.Event()
-        
-        # Start worker processes
-        workers = []
-        for _ in range(self.num_workers):
-            p = mp.Process(
-                target=_worker_process,
-                args=(token, secret_queue, result_queue, counter, stop_event),
-                daemon=True
-            )
-            p.start()
-            workers.append(p)
-        
-        # Feed secrets to queue in chunks
+        attempts = 0
         start_time = time.time()
         last_update = start_time
         
         try:
-            chunk = []
-            for secret in secrets_iter:
-                if stop_event.is_set():
-                    break
+            with mp.Pool(processes=self.num_workers) as pool:
+                # Create argument generator
+                def args_generator():
+                    for secret in secrets_iter:
+                        yield (token, secret)
                 
-                chunk.append(secret)
-                
-                # When chunk is full, feed each secret to queue
-                if len(chunk) >= chunk_size:
-                    for s in chunk:
-                        if stop_event.is_set():
-                            break
-                        secret_queue.put(s)
-                    chunk = []
-                
-                # Update progress periodically
-                current_time = time.time()
-                if progress_callback and (current_time - last_update) >= 1.0:
-                    elapsed = current_time - start_time
-                    attempts = counter.value
+                # Use imap_unordered with generator
+                for secret, is_valid in pool.imap_unordered(_verify_secret_worker, args_generator(), chunksize=chunk_size):
+                    attempts += 1
                     
-                    progress = ProgressUpdate(
-                        attempts=attempts,
-                        elapsed_time=elapsed,
-                        attempts_per_second=attempts / elapsed if elapsed > 0 else 0,
-                        percentage=None,  # Can't calculate without total
-                        estimated_remaining=None
-                    )
-                    progress_callback(progress)
-                    last_update = current_time
+                    # Found the secret!
+                    if is_valid:
+                        pool.terminate()
+                        return CrackResult(
+                            success=True,
+                            secret=secret,
+                            attempts=attempts
+                        )
+                    
+                    # Update progress periodically
+                    current_time = time.time()
+                    if progress_callback and (current_time - last_update) >= 1.0:
+                        elapsed = current_time - start_time
+                        
+                        progress = ProgressUpdate(
+                            attempts=attempts,
+                            elapsed_time=elapsed,
+                            attempts_per_second=attempts / elapsed if elapsed > 0 else 0,
+                            percentage=None,  # Can't calculate without total
+                            estimated_remaining=None
+                        )
+                        progress_callback(progress)
+                        last_update = current_time
             
-            # Feed remaining secrets in chunk
-            for s in chunk:
-                if stop_event.is_set():
-                    break
-                secret_queue.put(s)
+            # No secret found
+            return CrackResult(
+                success=False,
+                attempts=attempts
+            )
             
-            # Send poison pills to stop workers
-            for _ in range(self.num_workers):
-                secret_queue.put(None)
-            
-            # Wait for workers to finish or result to be found
-            for p in workers:
-                p.join(timeout=30.0)
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=1)
-            
-            # Check result
-            try:
-                success, secret = result_queue.get_nowait()
-                return CrackResult(
-                    success=True,
-                    secret=secret,
-                    attempts=counter.value
-                )
-            except Empty:
-                return CrackResult(
-                    success=False,
-                    attempts=counter.value
-                )
-                
         except Exception as e:
-            # Clean up workers
-            stop_event.set()
-            for p in workers:
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=1)
-            raise
-        finally:
-            # Ensure all workers are cleaned up
-            for p in workers:
-                if p.is_alive():
-                    p.terminate()
+            # Fallback to single-threaded
+            print(f"Streaming pool failed ({e}), falling back to single-threaded mode")
+            return CrackResult(
+                success=False,
+                attempts=attempts
+            )
     
     def _crack_singlethread(self, token: str, secrets: Iterator[str],
-                           total_secrets: int, progress_callback: Optional[Callable]) -> CrackResult:
+                           total_secrets: Optional[int], progress_callback: Optional[Callable]) -> CrackResult:
         """Crack using single thread (fallback)"""
         verifier = JWTVerifier()
         attempts = 0
@@ -495,14 +349,18 @@ class JWTCracker:
         for secret in secrets:
             attempts += 1
             
-            result = verifier.verify(token, secret)
-            
-            if result.valid:
-                return CrackResult(
-                    success=True,
-                    secret=secret,
-                    attempts=attempts
-                )
+            try:
+                result = verifier.verify(token, secret)
+                
+                if result.valid:
+                    return CrackResult(
+                        success=True,
+                        secret=secret,
+                        attempts=attempts
+                    )
+            except Exception:
+                # Skip invalid secrets
+                pass
             
             # Update progress
             current_time = time.time()
@@ -513,8 +371,8 @@ class JWTCracker:
                     attempts=attempts,
                     elapsed_time=elapsed,
                     attempts_per_second=attempts / elapsed if elapsed > 0 else 0,
-                    percentage=(attempts / total_secrets * 100) if total_secrets > 0 else None,
-                    estimated_remaining=((total_secrets - attempts) / (attempts / elapsed)) if attempts > 0 and elapsed > 0 else None
+                    percentage=(attempts / total_secrets * 100) if total_secrets and total_secrets > 0 else None,
+                    estimated_remaining=((total_secrets - attempts) / (attempts / elapsed)) if total_secrets and attempts > 0 and elapsed > 0 else None
                 )
                 progress_callback(progress)
                 last_update = current_time

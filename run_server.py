@@ -10,8 +10,8 @@ if __name__ == "__main__":
     print("JWT Security Tool - Web Server")
     print("=" * 70)
     print()
-    print("Starting server on http://localhost:8000")
-    print("API documentation available at http://localhost:8000/docs")
+    print("Starting server on http://localhost:8099")
+    print("API documentation available at http://localhost:8099/docs")
     print()
     print("Press Ctrl+C to stop the server")
     print("=" * 70)
@@ -21,7 +21,7 @@ if __name__ == "__main__":
         uvicorn.run(
             "src.api.app:app",
             host="0.0.0.0",
-            port=8000,
+            port=8099,
             reload=True,
             log_level="info"
         )

@@ -303,12 +303,37 @@ async def run_crack_job(job_id: str, token: str, wordlist: Optional[str],
         with ThreadPoolExecutor(max_workers=1) as executor:
             cracker = JWTCracker(num_workers=workers)
             
-            # Use streaming method with content directly (no temp file!)
+            # Get all wordlist files from wordlists directory
+            project_root = Path(__file__).parent.parent.parent
+            wordlists_dir = project_root / "wordlists"
+            
+            # Combine all wordlist files
+            combined_wordlist_content = ""
+            if wordlists_dir.exists() and wordlists_dir.is_dir():
+                # Get all .txt files in wordlists directory
+                wordlist_files = sorted(wordlists_dir.glob("*.txt"))
+                
+                if wordlist_files:
+                    print(f"Loading {len(wordlist_files)} wordlist file(s):")
+                    for wl_file in wordlist_files:
+                        print(f"  - {wl_file.name}")
+                        try:
+                            with open(wl_file, 'r', encoding='utf-8', errors='ignore') as f:
+                                combined_wordlist_content += f.read() + "\n"
+                        except Exception as e:
+                            print(f"  Warning: Failed to load {wl_file.name}: {e}")
+            
+            # If user provided wordlist content, append it
+            if wordlist:
+                combined_wordlist_content += wordlist
+            
+            # Use streaming method with combined wordlist
             result = await loop.run_in_executor(
                 executor,
                 lambda: cracker.crack_streaming(
                     token=token,
-                    wordlist_content=wordlist,  # Pass content directly
+                    wordlist_path=None,  # Use content instead of path
+                    wordlist_content=combined_wordlist_content if combined_wordlist_content else None,
                     use_common=use_common,
                     progress_callback=progress_callback,
                     chunk_size=1000  # Process in chunks of 1000

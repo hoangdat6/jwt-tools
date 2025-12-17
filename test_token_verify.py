@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Verify test token"""
 
+import os
 import sys
-sys.path.insert(0, '/home/dathv2004/Documents/BKDN/Learning/Pentest/jwt-tool')
+
+# Add project root to path
+project_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, project_root)
 
 from src.verifier import JWTVerifier
 from src.parser import JWTParser
